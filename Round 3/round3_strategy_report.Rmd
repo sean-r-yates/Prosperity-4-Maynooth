@@ -1,0 +1,580 @@
+---
+title: "Round 3 Voucher Market Report"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+params:
+  bucket_size: 10000
+  output_dir: "output"
+---
+
+```{r setup, include=FALSE}
+user_library <- trimws(path.expand(Sys.getenv("R_LIBS_USER")))
+if (nzchar(user_library) && dir.exists(user_library)) {
+  .libPaths(unique(c(user_library, .libPaths())))
+}
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "knitr",
+  "purrr",
+  "readr",
+  "scales",
+  "stringr",
+  "tibble",
+  "tidyr"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing packages: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 14,
+  fig.height = 6,
+  dpi = 120
+)
+
+current_input <- knitr::current_input()
+report_dir <- if (length(current_input) == 1 && nzchar(current_input)) {
+  dirname(normalizePath(current_input, winslash = "/", mustWork = TRUE))
+} else {
+  normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+}
+
+data_dir <- file.path(report_dir, "Data Capsule")
+output_dir <- if (grepl("^(?:[A-Za-z]:|/|\\\\\\\\)", params$output_dir)) {
+  params$output_dir
+} else {
+  file.path(report_dir, params$output_dir)
+}
+png_dir <- file.path(output_dir, "png")
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(png_dir, recursive = TRUE, showWarnings = FALSE)
+
+bucket_size <- params$bucket_size
+
+roll_mean <- function(x, window = 5) {
+  if (length(x) == 0 || window <= 1) {
+    return(x)
+  }
+
+  as.numeric(stats::filter(x, rep(1 / window, window), sides = 1))
+}
+
+nan_to_na <- function(x) {
+  x[is.nan(x)] <- NA_real_
+  x
+}
+
+read_capsule_file <- function(path, kind = c("prices", "trades")) {
+  kind <- match.arg(kind)
+  day_from_name <- as.integer(stringr::str_extract(basename(path), "(?<=day_)\\d+"))
+
+  data <- readr::read_delim(
+    path,
+    delim = ";",
+    show_col_types = FALSE,
+    progress = FALSE,
+    trim_ws = TRUE
+  )
+
+  if (!"day" %in% names(data)) {
+    data <- dplyr::mutate(data, day = day_from_name)
+  }
+
+  if (kind == "trades" && !"product" %in% names(data)) {
+    data <- dplyr::mutate(data, product = symbol)
+  }
+
+  dplyr::mutate(
+    data,
+    day = as.integer(day),
+    global_time = day * 1000000 + timestamp
+  )
+}
+
+price_files <- list.files(
+  data_dir,
+  pattern = "^prices_round_3_day_\\d+\\.csv$",
+  full.names = TRUE
+)
+trade_files <- list.files(
+  data_dir,
+  pattern = "^trades_round_3_day_\\d+\\.csv$",
+  full.names = TRUE
+)
+
+prices <- purrr::map_dfr(price_files, read_capsule_file, kind = "prices") %>%
+  dplyr::arrange(product, global_time)
+
+trades <- purrr::map_dfr(trade_files, read_capsule_file, kind = "trades") %>%
+  dplyr::arrange(product, global_time)
+
+day_breaks <- tibble::tibble(
+  x = sort(unique(prices$day)) * 1000000
+) %>%
+  dplyr::filter(x > min(x))
+
+day_labels <- tibble::tibble(
+  day = sort(unique(prices$day)),
+  start_x = sort(unique(prices$day)) * 1000000,
+  mid_x = sort(unique(prices$day)) * 1000000 + 500000,
+  label = paste0("day", sort(unique(prices$day)))
+)
+
+bucketed_prices <- prices %>%
+  dplyr::mutate(
+    bucket = floor(global_time / bucket_size),
+    bucket_time = bucket * bucket_size + bucket_size / 2
+  ) %>%
+  dplyr::group_by(product, day, bucket, bucket_time) %>%
+  dplyr::summarise(
+    open = dplyr::first(mid_price),
+    high = max(mid_price, na.rm = TRUE),
+    low = min(mid_price, na.rm = TRUE),
+    close = dplyr::last(mid_price),
+    rel_spread = mean((ask_price_1 - bid_price_1) / pmax(mid_price, 1e-9), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(rel_spread = nan_to_na(rel_spread))
+
+bucketed_trades <- trades %>%
+  dplyr::mutate(
+    bucket = floor(global_time / bucket_size),
+    bucket_time = bucket * bucket_size + bucket_size / 2
+  ) %>%
+  dplyr::group_by(product, day, bucket, bucket_time) %>%
+  dplyr::summarise(
+    trade_count = dplyr::n(),
+    trade_volume = sum(quantity, na.rm = TRUE),
+    trade_notional = sum(price * quantity, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+spot <- bucketed_prices %>%
+  dplyr::filter(product == "VELVETFRUIT_EXTRACT") %>%
+  dplyr::arrange(bucket_time) %>%
+  dplyr::mutate(
+    rolling_close = roll_mean(close, 5)
+  )
+
+underlyings <- bucketed_prices %>%
+  dplyr::filter(product %in% c("HYDROGEL_PACK", "VELVETFRUIT_EXTRACT")) %>%
+  dplyr::arrange(product, bucket_time) %>%
+  dplyr::group_by(product) %>%
+  dplyr::mutate(
+    rolling_close = roll_mean(close, 5)
+  ) %>%
+  dplyr::ungroup()
+
+underlying_summary <- underlyings %>%
+  dplyr::left_join(
+    bucketed_trades %>%
+      dplyr::filter(product %in% c("HYDROGEL_PACK", "VELVETFRUIT_EXTRACT")) %>%
+      dplyr::group_by(product) %>%
+      dplyr::summarise(
+        total_trade_count = sum(trade_count, na.rm = TRUE),
+        total_trade_volume = sum(trade_volume, na.rm = TRUE),
+        total_trade_notional = sum(trade_notional, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "product"
+  ) %>%
+  dplyr::group_by(product) %>%
+  dplyr::summarise(
+    start_price = dplyr::first(close),
+    end_price = dplyr::last(close),
+    net_change = dplyr::last(close) - dplyr::first(close),
+    pct_change = 100 * (dplyr::last(close) / dplyr::first(close) - 1),
+    min_price = min(close, na.rm = TRUE),
+    max_price = max(close, na.rm = TRUE),
+    price_range = max(close, na.rm = TRUE) - min(close, na.rm = TRUE),
+    avg_rel_spread_pct = mean(rel_spread, na.rm = TRUE) * 100,
+    total_trade_count = dplyr::first(total_trade_count),
+    total_trade_volume = dplyr::first(total_trade_volume),
+    total_trade_notional = dplyr::first(total_trade_notional),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(
+      c(
+        start_price,
+        end_price,
+        net_change,
+        pct_change,
+        min_price,
+        max_price,
+        price_range,
+        avg_rel_spread_pct
+      ),
+      ~ round(.x, 2)
+    ),
+    avg_trade_size = round(total_trade_volume / pmax(total_trade_count, 1), 2),
+    avg_trade_price = round(total_trade_notional / pmax(total_trade_volume, 1), 2),
+    dplyr::across(
+      c(total_trade_volume, total_trade_notional),
+      ~ round(.x, 0)
+    )
+  )
+
+vouchers <- bucketed_prices %>%
+  dplyr::filter(stringr::str_detect(product, "^VEV_")) %>%
+  dplyr::mutate(
+    strike = as.integer(stringr::str_extract(product, "\\d+"))
+  ) %>%
+  dplyr::left_join(
+    dplyr::select(spot, bucket, spot_close = close),
+    by = "bucket"
+  ) %>%
+  dplyr::left_join(
+    dplyr::select(bucketed_trades, product, bucket, trade_count, trade_volume, trade_notional),
+    by = c("product", "bucket")
+  ) %>%
+  dplyr::mutate(
+    trade_count = tidyr::replace_na(trade_count, 0L),
+    trade_volume = tidyr::replace_na(trade_volume, 0),
+    trade_notional = tidyr::replace_na(trade_notional, 0),
+    spot_minus_strike = spot_close - strike,
+    intrinsic_value = pmax(spot_minus_strike, 0),
+    time_value = close - intrinsic_value,
+    rel_spread_pct = rel_spread * 100
+  )
+
+last_spot_close <- dplyr::last(spot$close)
+
+voucher_summary <- vouchers %>%
+  dplyr::group_by(product, strike) %>%
+  dplyr::summarise(
+    start_price = dplyr::first(close),
+    end_price = dplyr::last(close),
+    net_change = dplyr::last(close) - dplyr::first(close),
+    pct_change = 100 * (dplyr::last(close) / dplyr::first(close) - 1),
+    avg_rel_spread_pct = mean(rel_spread_pct, na.rm = TRUE),
+    total_trade_count = sum(trade_count, na.rm = TRUE),
+    total_trade_volume = sum(trade_volume, na.rm = TRUE),
+    total_trade_notional = sum(trade_notional, na.rm = TRUE),
+    avg_time_value = mean(time_value, na.rm = TRUE),
+    last_time_value = dplyr::last(time_value),
+    last_intrinsic_value = dplyr::last(intrinsic_value),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(
+      c(
+        start_price,
+        end_price,
+        net_change,
+        pct_change,
+        avg_rel_spread_pct,
+        avg_time_value,
+        last_time_value,
+        last_intrinsic_value
+      ),
+      nan_to_na
+    ),
+    last_spot = last_spot_close,
+    distance_to_last_spot = strike - last_spot_close,
+    avg_trade_size = total_trade_volume / pmax(total_trade_count, 1),
+    avg_trade_price = total_trade_notional / pmax(total_trade_volume, 1)
+  ) %>%
+  dplyr::arrange(strike)
+
+most_traded <- voucher_summary %>%
+  dplyr::slice_max(order_by = total_trade_count, n = 1)
+
+tightest_name <- voucher_summary %>%
+  dplyr::filter(is.finite(avg_rel_spread_pct)) %>%
+  dplyr::slice_min(order_by = avg_rel_spread_pct, n = 1)
+
+richest_time_value <- voucher_summary %>%
+  dplyr::slice_max(order_by = avg_time_value, n = 1)
+
+base_theme <- ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold", size = 15),
+    plot.subtitle = ggplot2::element_text(size = 10, colour = "#475569"),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = "bottom"
+  )
+
+time_scale <- ggplot2::scale_x_continuous(
+  labels = scales::label_number(scale_cut = scales::cut_short_scale())
+)
+
+add_day_lines <- function(plot) {
+  plot +
+    ggplot2::geom_vline(
+      data = day_breaks,
+      ggplot2::aes(xintercept = x),
+      inherit.aes = FALSE,
+      linetype = "dashed",
+      colour = "#94a3b8",
+      linewidth = 0.4
+    )
+}
+
+add_day_labels <- function(plot) {
+  plot +
+    ggplot2::geom_text(
+      data = day_labels,
+      ggplot2::aes(x = mid_x, y = Inf, label = label),
+      inherit.aes = FALSE,
+      vjust = 1.4,
+      colour = "#64748b",
+      size = 3.4,
+      fontface = "bold"
+    )
+}
+
+save_plot <- function(plot, filename, width = 14, height = 6) {
+  ggplot2::ggsave(
+    filename = file.path(png_dir, filename),
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = 320,
+    bg = "white"
+  )
+}
+
+underlyings_plot <- ggplot2::ggplot(underlyings, ggplot2::aes(x = bucket_time, y = close)) +
+  ggplot2::geom_line(colour = "#93c5fd", linewidth = 0.35) +
+  ggplot2::geom_line(
+    ggplot2::aes(y = rolling_close),
+    colour = "#2563eb",
+    linewidth = 0.9
+  ) +
+  ggplot2::facet_wrap(~ product, ncol = 1, scales = "free_y") +
+  ggplot2::labs(
+    title = "Underlying price series",
+    subtitle = paste0(
+      "Bucket size: ",
+      scales::comma(bucket_size),
+      ". Thin lines show bucket closes. Thick lines show a 5-bucket rolling mean. Dashed lines and labels separate day0, day1, and day2."
+    ),
+    x = NULL,
+    y = "Mid price"
+  ) +
+  time_scale +
+  base_theme
+
+underlyings_plot <- add_day_lines(underlyings_plot)
+underlyings_plot <- add_day_labels(underlyings_plot)
+
+strike_levels <- sort(unique(vouchers$strike))
+spot_low <- min(spot$low, na.rm = TRUE)
+spot_high <- max(spot$high, na.rm = TRUE)
+visible_strikes <- strike_levels[
+  strike_levels >= (spot_low - 35) &
+    strike_levels <= (spot_high + 35)
+]
+if (length(visible_strikes) == 0) {
+  visible_strikes <- strike_levels
+}
+y_min <- min(c(spot_low, visible_strikes), na.rm = TRUE) - 12
+y_max <- max(c(spot_high, visible_strikes), na.rm = TRUE) + 12
+right_edge <- max(spot$bucket_time) + bucket_size * 8
+
+spot_strike_plot <- ggplot2::ggplot(spot, ggplot2::aes(x = bucket_time, y = close)) +
+  ggplot2::geom_hline(
+    data = tibble::tibble(strike = visible_strikes),
+    ggplot2::aes(yintercept = strike),
+    inherit.aes = FALSE,
+    colour = "#94a3b8",
+    linetype = "dotted",
+    linewidth = 0.55
+  ) +
+  ggplot2::geom_line(colour = "#93c5fd", linewidth = 0.35) +
+  ggplot2::geom_line(ggplot2::aes(y = rolling_close), colour = "#2563eb", linewidth = 0.95) +
+  ggplot2::geom_text(
+    data = tibble::tibble(strike = visible_strikes, label_x = right_edge),
+    ggplot2::aes(x = label_x, y = strike, label = paste0("K=", strike)),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3,
+    colour = "#64748b"
+  ) +
+  ggplot2::labs(
+    title = "VELVETFRUIT_EXTRACT versus voucher strike ladder",
+    subtitle = "Horizontal lines mark the visible strike range around the spot path. Dashed lines separate day0, day1, and day2.",
+    x = "Continuous time",
+    y = "VELVETFRUIT_EXTRACT mid price"
+  ) +
+  ggplot2::coord_cartesian(ylim = c(y_min, y_max), clip = "off") +
+  ggplot2::scale_x_continuous(
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    expand = ggplot2::expansion(mult = c(0.01, 0.08))
+  ) +
+  base_theme
+
+spot_strike_plot <- add_day_lines(spot_strike_plot)
+spot_strike_plot <- add_day_labels(spot_strike_plot)
+
+time_value_cap <- stats::quantile(vouchers$time_value, 0.95, na.rm = TRUE)
+vouchers_for_plot <- vouchers %>%
+  dplyr::mutate(time_value_plot = pmin(time_value, time_value_cap))
+
+time_value_plot <- ggplot2::ggplot(
+  vouchers_for_plot,
+  ggplot2::aes(
+    x = bucket_time,
+    y = factor(strike, levels = rev(sort(unique(strike)))),
+    fill = time_value_plot
+  )
+) +
+  ggplot2::geom_tile() +
+  ggplot2::scale_fill_gradientn(
+    colours = c("#0f172a", "#4c1d95", "#db2777", "#f59e0b", "#fef08a"),
+    na.value = "#f8fafc"
+  ) +
+  ggplot2::labs(
+    title = "Voucher time value",
+    subtitle = "Time value is calculated as voucher mid price minus intrinsic value. Colour scale is clipped at the 95th percentile to increase contrast.",
+    x = "Continuous time",
+    y = "Strike",
+    fill = "Time value"
+  ) +
+  time_scale +
+  base_theme
+
+time_value_plot <- add_day_lines(time_value_plot)
+time_value_plot <- add_day_labels(time_value_plot)
+
+liquidity_plot <- ggplot2::ggplot(
+  voucher_summary,
+  ggplot2::aes(
+    x = avg_rel_spread_pct,
+    y = total_trade_count,
+    size = total_trade_volume,
+    colour = avg_time_value
+  )
+) +
+  ggplot2::geom_point(alpha = 0.9) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = product),
+    hjust = -0.05,
+    nudge_x = 2,
+    size = 3,
+    check_overlap = TRUE
+  ) +
+  ggplot2::scale_colour_viridis_c(option = "D", na.value = "#64748b") +
+  ggplot2::scale_size_area(max_size = 14) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::expand_limits(x = max(voucher_summary$avg_rel_spread_pct, na.rm = TRUE) * 1.18) +
+  ggplot2::labs(
+    title = "Voucher liquidity summary",
+    subtitle = "X-axis: average relative spread. Y-axis: total trade count. Bubble size: total traded volume. Colour: average time value.",
+    x = "Average relative spread (%)",
+    y = "Total trade count",
+    size = "Trade volume",
+    colour = "Avg time value"
+  ) +
+  base_theme
+
+voucher_summary_table <- voucher_summary %>%
+  dplyr::mutate(
+    start_price = round(start_price, 2),
+    end_price = round(end_price, 2),
+    net_change = round(net_change, 2),
+    pct_change = round(pct_change, 2),
+    avg_rel_spread_pct = round(avg_rel_spread_pct, 2),
+    total_trade_volume = round(total_trade_volume, 0),
+    total_trade_notional = round(total_trade_notional, 0),
+    avg_trade_size = round(avg_trade_size, 2),
+    avg_trade_price = round(avg_trade_price, 2),
+    avg_time_value = round(avg_time_value, 2),
+    last_time_value = round(last_time_value, 2),
+    last_intrinsic_value = round(last_intrinsic_value, 2),
+    last_spot = round(last_spot, 2),
+    distance_to_last_spot = round(distance_to_last_spot, 2),
+    share_of_trade_count_pct = round(
+      100 * total_trade_count / sum(total_trade_count, na.rm = TRUE),
+      2
+    )
+  )
+
+save_plot(underlyings_plot, "01_underlying_price_series.png", width = 14, height = 8)
+save_plot(spot_strike_plot, "02_spot_vs_strikes.png")
+save_plot(time_value_plot, "03_time_value_heatmap.png")
+save_plot(liquidity_plot, "04_liquidity_map.png", width = 14, height = 7)
+```
+
+# Report Scope
+
+This report summarizes Round 3 price, strike, time value, and liquidity structure using bucketed data.
+
+Bucket size: `r scales::comma(bucket_size)` time steps.
+
+# Summary Statistics
+
+- Most traded voucher: **`r most_traded$product`** (`r scales::comma(most_traded$total_trade_count)` trades)
+- Lowest average relative spread: **`r tightest_name$product`** (`r round(tightest_name$avg_rel_spread_pct, 2)`%)
+- Highest average time value: **`r richest_time_value$product`** (`r round(richest_time_value$avg_time_value, 2)`)
+
+# 1. Underlying Price Series
+
+The chart below shows bucketed price series for `HYDROGEL_PACK` and `VELVETFRUIT_EXTRACT`. Thin lines show bucket closes. Thick lines show a 5-bucket rolling mean.
+
+```{r underlyings}
+underlyings_plot
+```
+
+# Underlying Summary Table
+
+```{r underlying-summary-table}
+knitr::kable(
+  underlying_summary,
+  caption = "Underlying summary for HYDROGEL_PACK and VELVETFRUIT_EXTRACT."
+)
+```
+
+# 2. VELVETFRUIT_EXTRACT Versus Strike Ladder
+
+The chart below shows `VELVETFRUIT_EXTRACT` against the voucher strike ladder. Horizontal reference lines mark strike levels.
+
+```{r spot-vs-strikes}
+spot_strike_plot
+```
+
+# 3. Voucher Time Value
+
+The heatmap below shows voucher time value by strike and time bucket. Time value is defined as voucher mid price minus intrinsic value.
+
+```{r time-value-heatmap}
+time_value_plot
+```
+
+# 4. Voucher Liquidity Summary
+
+The chart below summarizes voucher liquidity. Lower values on the x-axis indicate tighter average spreads. Higher values on the y-axis indicate more trade activity.
+
+```{r liquidity-map}
+liquidity_plot
+```
+
+# Voucher Summary Table
+
+```{r summary-table}
+knitr::kable(
+  voucher_summary_table,
+  caption = "Round 3 voucher summary."
+)
+```
