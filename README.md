@@ -56,7 +56,7 @@ It was a simpler manual than what came later, but it still mattered.
 
 </details>
 
-<details open>
+<details>
 <summary><h2>Round 2</h2></summary>
 
 <h3>Files</h3>
@@ -169,7 +169,7 @@ That is the kind of edge I care about: relatively cheap to create, hard to copy 
 
 </details>
 
-<details open>
+<details>
 <summary><h2>Round 3</h2></summary>
 
 <h3>Files</h3>
