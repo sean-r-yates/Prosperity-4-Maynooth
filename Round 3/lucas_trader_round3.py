@@ -10,8 +10,10 @@ class Trader:
         self.position_limits = {
             "HYDROGEL_PACK": 200,
             "VELVETFRUIT_EXTRACT": 200,
-            self.active_vouchers: 300
         }
+        
+        for v in self.voucher_strikes:
+            self.position_limits[v] = 300
 
         self.price_history = {
             "HYDROGEL_PACK": [],
@@ -249,7 +251,7 @@ class Trader:
                 self.trade_hydrogel(state)
             elif product == "VELVETFRUIT_EXTRACT":
                 self.trade_velvetfruit(state)
-            else:
-                self.trade_vouchers(state)
+            
+        self.trade_vouchers(state)
         
         return self.orders, self.conversions, self.traderData
