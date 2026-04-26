@@ -11,9 +11,8 @@ class Trader:
             "HYDROGEL_PACK": 200,
             "VELVETFRUIT_EXTRACT": 200,
         }
+
         
-        for v in self.voucher_strikes:
-            self.position_limits[v] = 300
 
         self.price_history = {
             "HYDROGEL_PACK": [],
@@ -35,7 +34,10 @@ class Trader:
         "VEV_5500": 5500,
         "VEV_6000": 6000,
         "VEV_6500": 6500,
-    }
+        }
+
+        for v in self.voucher_strikes:
+            self.position_limits[v] = 300
 
 
     # ---------- helper functions
@@ -196,6 +198,9 @@ class Trader:
         # =========================
         for product in fair_values:
 
+            if product not in self.orders: #incase of missing key
+                self.orders[product] = []
+
             fair = fair_values[product]
             mid, bid, ask = market_data[product]
 
@@ -217,6 +222,9 @@ class Trader:
         sorted_products = sorted(self.voucher_strikes.items(), key=lambda x: x[1])
 
         for i in range(len(sorted_products) - 1):
+
+            if product not in self.orders: #incase of missing key
+                self.orders[product] = []
 
             p1, _ = sorted_products[i]
             p2, _ = sorted_products[i + 1]
