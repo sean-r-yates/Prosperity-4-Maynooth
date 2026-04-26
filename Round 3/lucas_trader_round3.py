@@ -76,10 +76,10 @@ class Trader:
         self.update_price_history(product, mid_price)
 
         window = 200
-        if len(self.history[product]) < window:
+        if len(self.price_history[product]) < window:
             return
     
-        prices = self.history[product][-window:]
+        prices = self.price_history[product][-window:]
         mean = np.mean(prices)
         std = np.std(prices)
 
@@ -114,10 +114,10 @@ class Trader:
         self.update_price_history(product, mid_price)
 
         window = 150
-        if len(self.history[product]) < window:
+        if len(self.price_history[product]) < window:
             return
         
-        prices = self.history[product][-window:]
+        prices = self.price_history[product][-window:]
         mean = np.mean(prices)
         std = np.std(prices)
 
@@ -158,7 +158,7 @@ class Trader:
         S = (ubid + uask) / 2
 
         # --- Need history for volatility ---
-        prices = self.history["VELVETFRUIT_EXTRACT"]
+        prices = self.price_history["VELVETFRUIT_EXTRACT"]
         if len(prices) < 50:
             return
 
@@ -249,7 +249,7 @@ class Trader:
                 self.trade_hydrogel(state)
             elif product == "VELVETFRUIT_EXTRACT":
                 self.trade_velvetfruit(state)
+            else:
+                self.trade_vouchers(state)
         
-        self.trade_vouchers(state)
-
         return self.orders, self.conversions, self.traderData
