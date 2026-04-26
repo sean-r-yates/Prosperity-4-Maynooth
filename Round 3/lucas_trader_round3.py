@@ -22,6 +22,20 @@ class Trader:
         self.conversions = 0
         self.traderData = ""
 
+        self.voucher_strikes = {
+        "VEV_4000": 4000,
+        "VEV_4500": 4500,
+        "VEV_5000": 5000,
+        "VEV_5100": 5100,
+        "VEV_5200": 5200,
+        "VEV_5300": 5300,
+        "VEV_5400": 5400,
+        "VEV_5500": 5500,
+        "VEV_6000": 6000,
+        "VEV_6500": 6500,
+    }
+
+
     # ---------- helper functions
     def get_position(self, state, product):
         return state.position.get(product, 0)
@@ -130,31 +144,36 @@ class Trader:
                 self.orders[product].append(Order(product, best_bid, -size)) 
 
     #--------- VOUCHERS
-    def trade_vouchers(self, state):
-        orders = {product: [] for product in self.voucher_strikes}
+    def trade_vouchers(self, state: TradingState):
+        # --- Ensure underlying exists ---
+        if "VELVETFRUIT_EXTRACT" not in state.order_depths:
+            return
 
-        # --- Get underlying price ---
         u_depth = state.order_depths["VELVETFRUIT_EXTRACT"]
         if not u_depth.buy_orders or not u_depth.sell_orders:
-            return orders
+            return
 
         ubid = max(u_depth.buy_orders)
         uask = min(u_depth.sell_orders)
         S = (ubid + uask) / 2
 
-        # --- Estimate volatility ---
+        # --- Need history for volatility ---
         prices = self.history["VELVETFRUIT_EXTRACT"]
         if len(prices) < 50:
-            return orders
+            return
 
         recent = prices[-50:]
-        vol = np.std(np.diff(recent))  # better than raw std
+        vol = np.std(np.diff(recent))
 
-        # --- Compute fair values ---
+        # --- Store computed values ---
         fair_values = {}
-        market_prices = {}
+        market_data = {}
 
         for product, K in self.voucher_strikes.items():
+
+            if product not in state.order_depths:
+                continue
+
             depth = state.order_depths[product]
             if not depth.buy_orders or not depth.sell_orders:
                 continue
@@ -163,59 +182,61 @@ class Trader:
             best_ask = min(depth.sell_orders)
             mid = (best_bid + best_ask) / 2
 
-            # Simplified pricing
+            # --- Pricing ---
             time_value = 1.0 * vol
             fair = max(0, S - K) + time_value
 
             fair_values[product] = fair
-            market_prices[product] = (mid, best_bid, best_ask)
+            market_data[product] = (mid, best_bid, best_ask)
 
-        # --- 1. Absolute mispricing trades ---
+        # =========================
+        # 1. Absolute mispricing
+        # =========================
         for product in fair_values:
+
             fair = fair_values[product]
-            mid, bid, ask = market_prices[product]
+            mid, bid, ask = market_data[product]
 
             edge = mid - fair
 
             pos = state.position.get(product, 0)
             limit = 300
-
             size = 5
 
             if edge < -2 and pos < limit:
-                orders[product].append(Order(product, ask, size))
+                self.orders[product].append(Order(product, ask, size))
 
             elif edge > 2 and pos > -limit:
-                orders[product].append(Order(product, bid, -size))
+                self.orders[product].append(Order(product, bid, -size))
 
-        # --- 2. Relative value trades (IMPORTANT) ---
+        # =========================
+        # 2. Relative value trades
+        # =========================
         sorted_products = sorted(self.voucher_strikes.items(), key=lambda x: x[1])
 
         for i in range(len(sorted_products) - 1):
-            p1, k1 = sorted_products[i]
-            p2, k2 = sorted_products[i + 1]
+
+            p1, _ = sorted_products[i]
+            p2, _ = sorted_products[i + 1]
 
             if p1 not in fair_values or p2 not in fair_values:
                 continue
 
-            spread_market = market_prices[p1][0] - market_prices[p2][0]
+            spread_market = market_data[p1][0] - market_data[p2][0]
             spread_fair = fair_values[p1] - fair_values[p2]
 
             diff = spread_market - spread_fair
-
             size = 3
 
             if diff > 2:
-                # p1 too expensive relative to p2
-                orders[p1].append(Order(p1, market_prices[p1][1], -size))
-                orders[p2].append(Order(p2, market_prices[p2][2], size))
+                # p1 overpriced vs p2
+                self.orders[p1].append(Order(p1, market_data[p1][1], -size))
+                self.orders[p2].append(Order(p2, market_data[p2][2], size))
 
             elif diff < -2:
-                # p1 too cheap relative to p2
-                orders[p1].append(Order(p1, market_prices[p1][2], size))
-                orders[p2].append(Order(p2, market_prices[p2][1], -size))
-
-        return orders
+                # p1 underpriced vs p2
+                self.orders[p1].append(Order(p1, market_data[p1][2], size))
+                self.orders[p2].append(Order(p2, market_data[p2][1], -size))
 
    
 
@@ -228,5 +249,7 @@ class Trader:
                 self.trade_hydrogel(state)
             elif product == "VELVETFRUIT_EXTRACT":
                 self.trade_velvetfruit(state)
+        
+        self.trade_vouchers(state)
 
         return self.orders, self.conversions, self.traderData
